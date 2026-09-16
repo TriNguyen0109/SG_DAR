@@ -74,14 +74,19 @@ def parse_args():
         "--hf_token",
         type=str,
         default=os.environ.get("HF_TOKEN"),
-        help="Hugging Face User Access Token for gated models."
+        help="Hugging Face User Access Token."
+    )
+    parser.add_argument(
+        "--cpu_offload",
+        action="store_true",
+        help="Enable Diffusers model CPU offloading to save VRAM."
     )
     
     # Generation hyperparameters
     parser.add_argument("--height", type=int, default=1024, help="Image height in pixels.")
     parser.add_argument("--width", type=int, default=1024, help="Image width in pixels.")
     parser.add_argument("--num_inference_steps", type=int, default=28, help="Number of denoising inference steps.")
-    parser.add_argument("--guidance_scale", type=float, default=4.5, help="Classifier-Free Guidance (CFG) scale.")
+    parser.add_argument("--guidance_scale", type=float, default=6.0, help="Classifier-Free Guidance (CFG) scale.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     
     # Execution & subset controls
@@ -108,7 +113,7 @@ def load_visdial_data(json_path):
 
 
 def init_sd35_pipeline(args):
-    """Initializes Stable Diffusion 3.5 Text-to-Image Pipeline via diffusers."""
+    """Initializes Stable Diffusion 3.5 Pipeline via diffusers."""
     if args.dry_run:
         logging.info("DRY RUN MODE: Skipping PyTorch and Diffusers model initialization.")
         return None, None
@@ -133,7 +138,21 @@ def init_sd35_pipeline(args):
         torch_dtype=torch_dtype,
         token=args.hf_token
     )
-    pipe = pipe.to(args.device)
+    should_offload = args.cpu_offload
+    if not should_offload and args.device == "cuda" and torch.cuda.is_available():
+        try:
+            free_mem, total_mem = torch.cuda.mem_get_info()
+            if total_mem < 20 * (1024 ** 3):
+                should_offload = True
+                logging.info(f"Detected GPU VRAM ({total_mem / (1024**3):.2f} GB) < 20GB. Automatically enabling CPU Offloading to prevent OOM.")
+        except Exception:
+            pass
+
+    if should_offload:
+        logging.info("Enabling Model CPU Offloading to optimize VRAM usage...")
+        pipe.enable_model_cpu_offload()
+    else:
+        pipe = pipe.to(args.device)
     logging.info("Pipeline loaded successfully.")
     
     generator = torch.Generator(device=args.device).manual_seed(args.seed)

@@ -116,8 +116,9 @@ Common arguments supported across `sd3_5_visdial_baseline.py` and `sd3_5_visdial
 | `--height` | `int` | `1024` | Image height |
 | `--width` | `int` | `1024` | Image width |
 | `--num_inference_steps` | `int` | `28` | Denoising steps |
-| `--guidance_scale` | `float` | `4.5` | Classifier-Free Guidance (CFG) scale |
-| `--strength` | `float` | `0.75` | Sketch conditioning strength (used in `sd3_5_visdial_sketch.py`) |
+| `--guidance_scale` | `float` | `6.0` | Classifier-Free Guidance (CFG) scale |
+| `--strength` | `float` | `0.85` | Sketch conditioning strength (used in `sd3_5_visdial_sketch.py`) |
+| `--no_invert_sketch` | `flag` | `False` | Disable automatic sketch color inversion (used in `sd3_5_visdial_sketch.py`) |
 | `--seed` | `int` | `42` | Random seed |
 | `--start_idx` | `int` | `0` | Starting index in dataset |
 | `--end_idx` | `int` | `None` | Ending index in dataset |
@@ -126,7 +127,3 @@ Common arguments supported across `sd3_5_visdial_baseline.py` and `sd3_5_visdial
 | `--dry_run` | `flag` | `False` | Run mock test without loading GPU/weights |
 
 ---
-
-## 📄 License
-
-Distributed under the [MIT License](LICENSE).

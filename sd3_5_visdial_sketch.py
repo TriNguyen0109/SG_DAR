@@ -19,13 +19,15 @@ import json
 import time
 import argparse
 import logging
+import numpy as np
 from pathlib import Path
 
 try:
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageOps
 except ImportError:
     Image = None
     ImageDraw = None
+    ImageOps = None
 
 # Set up logging
 logging.basicConfig(
@@ -79,13 +81,20 @@ def parse_args():
         default=os.environ.get("HF_TOKEN"),
         help="Hugging Face User Access Token."
     )
+    parser.add_argument(
+        "--cpu_offload",
+        action="store_true",
+        help="Enable Diffusers model CPU offloading to save VRAM."
+    )
     
     # Generation hyperparameters
     parser.add_argument("--height", type=int, default=1024, help="Image height in pixels.")
     parser.add_argument("--width", type=int, default=1024, help="Image width in pixels.")
     parser.add_argument("--num_inference_steps", type=int, default=28, help="Number of denoising inference steps.")
-    parser.add_argument("--guidance_scale", type=float, default=4.5, help="Classifier-Free Guidance (CFG) scale.")
-    parser.add_argument("--strength", type=float, default=0.75, help="Sketch conditioning / Img2Img transformation strength.")
+    parser.add_argument("--guidance_scale", type=float, default=6.0, help="Classifier-Free Guidance (CFG) scale.")
+    parser.add_argument("--strength", type=float, default=0.90, help="Sketch conditioning / Img2Img transformation strength.")
+    parser.add_argument("--sketch_mode", type=str, choices=["neutral_gray", "binary_black", "invert", "raw"], default="neutral_gray", help="Sketch preprocessing mode (neutral_gray prevents dark/white color bias).")
+    parser.add_argument("--lineart_threshold", type=int, default=220, help="Grayscale threshold (0-255) for lineart binarization.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     
     # Execution & subset controls
@@ -137,7 +146,21 @@ def init_sd35_pipeline(args):
         torch_dtype=torch_dtype,
         token=args.hf_token
     )
-    pipe = pipe.to(args.device)
+    should_offload = args.cpu_offload
+    if not should_offload and args.device == "cuda" and torch.cuda.is_available():
+        try:
+            free_mem, total_mem = torch.cuda.mem_get_info()
+            if total_mem < 20 * (1024 ** 3):
+                should_offload = True
+                logging.info(f"Detected GPU VRAM ({total_mem / (1024**3):.2f} GB) < 20GB. Automatically enabling CPU Offloading to prevent OOM.")
+        except Exception:
+            pass
+
+    if should_offload:
+        logging.info("Enabling Model CPU Offloading to optimize VRAM usage...")
+        pipe.enable_model_cpu_offload()
+    else:
+        pipe = pipe.to(args.device)
     logging.info("Pipeline loaded successfully.")
     
     generator = torch.Generator(device=args.device).manual_seed(args.seed)
@@ -233,7 +256,26 @@ def main():
                 try:
                     sketch_img = None
                     if sketch_path and os.path.exists(sketch_path) and Image:
-                        sketch_img = Image.open(sketch_path).convert("RGB").resize((args.width, args.height))
+                        raw_img = Image.open(sketch_path).convert("L")
+                        thresh = args.lineart_threshold
+                        
+                        if args.sketch_mode == "neutral_gray":
+                            # Background -> 128 (Neutral Gray, Zero-centered VAE Latent), Lines -> 0 (Dark stroke)
+                            arr = np.array(raw_img)
+                            proc = np.where(arr >= thresh, 128, 0).astype(np.uint8)
+                            sketch_img = Image.fromarray(proc).convert("RGB").resize((args.width, args.height))
+                        elif args.sketch_mode == "binary_black":
+                            # Background -> 0 (Pitch Black), Lines -> 255 (Bright White)
+                            binary_mask = raw_img.point(lambda p: 255 if p < thresh else 0)
+                            sketch_img = binary_mask.convert("RGB").resize((args.width, args.height))
+                        elif args.sketch_mode == "invert":
+                            # Inverted RGB sketch
+                            sketch_img = raw_img.convert("RGB").resize((args.width, args.height))
+                            if ImageOps:
+                                sketch_img = ImageOps.invert(sketch_img)
+                        else:
+                            # Raw original sketch
+                            sketch_img = raw_img.convert("RGB").resize((args.width, args.height))
                     
                     if sketch_img is not None:
                         output = pipe(
