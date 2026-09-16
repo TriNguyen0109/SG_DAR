@@ -1,10 +1,9 @@
-# Core Deep Learning & PyTorch
-torch
+# Core Deep Learning & PyTorch (Pre-installed in base image, ensure torchvision is present)
 torchvision
 
 # Hugging Face Diffusers & Model Pipelines for SD 3.5
-diffusers>=0.30.0
-transformers>=4.44.0
+diffusers==0.31.0
+transformers>=4.44.0,<5.0.0
 accelerate>=0.33.0
 huggingface_hub
 

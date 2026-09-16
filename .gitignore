@@ -10,16 +10,42 @@ venv/
 .vscode/
 .idea/
 .cache/
-
-# Generated Output & Logs & Dataset Images
-generated_images/
-generated_images_baseline/
-generated_images_sketch/
-sketches/
 *.log
-# Models & Weights
+
+# Models & Weights / Checkpoints
 models/
+*.ckpt
 *.safetensors
 *.bin
 *.pth
 *.onnx
+*.pt
+chatir_weights.ckpt
+
+# Datasets & Symlinks
+unlabeled2017
+**/unlabeled2017/
+sketches/
+
+# Generated Images & Output Dirs
+generated_images/
+generated_images_*/
+val_generated_images/
+.trash_val_generated_images/
+output_*/
+
+# Temp directories
+temp/
+temp_*/
+
+# External repos & third-party
+Diffusion-Agumented-Retrieval/
+
+# Other scripts & configs
+baselines.py
+run*.sh
+Dockerfile*
+compose*.yaml
+HUONG_DAN_CHAY.md
+README_xpib.md
+SCRIPTS_EXPLANATION.md

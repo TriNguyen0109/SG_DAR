@@ -1,30 +1,30 @@
 #!/bin/bash
 
 # ==============================================================================
-# Script tự động Build & Run Container cho SD 3.5 VisDial Pipeline
+# Script to automatically Build & Run Container for SD 3.5 VisDial Pipeline
 # ==============================================================================
 
 IMAGE_NAME="aiclub_visdial-core_baotg_sd35_v1"
 CONTAINER_NAME="sd35_visdial_runner"
 
-# Chuyển tới thư mục script
+# Navigate to script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 cd "$SCRIPT_DIR"
 
-# 1. Build Docker Image (nếu chưa có hoặc khi nâng cấp)
+# 1. Build Docker Image (if not present or when updated)
 echo "--------------------------------------------------------"
 echo "🔧 Building Docker Image: ${IMAGE_NAME}..."
 echo "--------------------------------------------------------"
 docker build -t ${IMAGE_NAME} .
 
-# 2. Chọn GPU sử dụng (Mặc định chọn GPU 0)
+# 2. Select GPU to use (Default: GPU 0)
 GPU_IDS="${1:-0}"
 
 echo "--------------------------------------------------------"
 echo "🚀 Running Docker Container on GPU(s): ${GPU_IDS}..."
 echo "--------------------------------------------------------"
 
-# Tạo thư mục cache nếu chưa có để lưu weights Hugging Face không bị tải lại nhiều lần
+# Create cache directory if not present to avoid redownloading Hugging Face weights
 mkdir -p "$SCRIPT_DIR/.cache/huggingface"
 
 docker run --gpus "\"device=${GPU_IDS}\"" \

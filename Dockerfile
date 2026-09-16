@@ -12,14 +12,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     wget \
     curl \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     htop \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 
-# Upgrade pip & install wheel build dependencies
+# Upgrade pip & install dependencies
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --upgrade pip setuptools wheel ninja && \
     pip install --no-cache-dir -r /tmp/requirements.txt

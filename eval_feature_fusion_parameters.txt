@@ -1,0 +1,65 @@
+================================================================================
+BẢNG TỔNG HỢP CÁC THÔNG SỐ QUAN TRỌNG (KEY PARAMETERS)
+Dự án: SG-DAR (VisDial Multimodal Image Retrieval)
+================================================================================
+
+1. CÁC THÔNG SỐ TRONG EVALUATION (eval_feature_fusion.py)
+--------------------------------------------------------------------------------
+* 3 Mô hình trích xuất (Retriever Backbones):
+  - 'chatir': BLIP ViT-B/16 Fine-tuned trên Visual Dialog (chatir_weights.ckpt)
+  - 'cocoft': BLIP ViT-B/16 Fine-tuned trên MS-COCO Retrieval (model_base_retrieval_coco.pth)
+  - 'zs'    : BLIP ViT-B/16 Zero-Shot Pretrained 129M (model_base.pth)
+  - Không gian đặc trưng: 768 chiều (L2-normalized)
+  - Kích thước ảnh vào  : 224 x 224
+
+* 4 Cấu hình truy xuất (Retrieval Configurations):
+  - B1: Text-only (Chỉ dùng văn bản hội thoại: v_query = v_text)
+  - B2: Direct Sketch (Kết hợp văn bản + nét vẽ phác thảo)
+  - B3: DAR (Kết hợp văn bản + ảnh sinh từ SD3)
+  - B4: SG-DAR (Kết hợp văn bản + ảnh sinh có hướng dẫn phác thảo SD3 + ControlNet)
+
+* Trọng số kết hợp đa phương thức (Feature-Level Fusion):
+  - gamma (w_g)         : 0.2  (Trọng số của nhánh phác thảo sketch)
+  - Trọng số cơ sở (a0: Text, b0: Ảnh sinh):
+      + Lượt 0, 1 (r < 2)  : Text = 0.8, Ảnh sinh = 0.2
+      + Lượt 2..10 (r >= 2): Text = 0.5, Ảnh sinh = 0.5
+  - Công thức hợp nhất  : v_fused = w_a * v_text + w_b * v_gen + w_g * v_sketch
+                          v_query = Normalize(v_fused)
+
+* Cấu hình đánh giá & Dataset:
+  - rounds              : 11 lượt (1 caption khởi đầu + 10 lượt hỏi-đáp Q&A)
+  - hits_at             : 10 (Đo lường Top-10 Hits@10 %)
+  - batch_size          : 128 (Kích thước batch trích xuất vector)
+  - num_workers         : 4 (Số luồng CPU nạp & tiền xử lý dữ liệu song song)
+  - Tập dữ liệu         : 1,000 hội thoại (11,000 queries) vs 50,000 ảnh ứng viên (Corpus)
+
+
+2. CÁC THÔNG SỐ SINH ẢNH B3 - DAR THUẦN TEXT (sd3_text.py)
+--------------------------------------------------------------------------------
+* Model sinh ảnh        : stabilityai/stable-diffusion-3-medium-diffusers
+* Độ phân giải ảnh      : 1024 x 1024
+* Số bước khử nhiễu     : 28 bước (num_inference_steps)
+* Guidance Scale (CFG)  : 7.0
+* Max Token (T5 Text)   : 512 tokens (Đảm bảo không bị cắt đoạn mô tả dài 10 lượt)
+* Kiểu dữ liệu          : torch.bfloat16
+* Random Seed           : 42 (Cố định để tái lập kết quả)
+* Negative Prompt       : "low quality, blurry, deformed, noisy, grainy, bad anatomy, artifacts, cut off"
+
+
+3. CÁC THÔNG SỐ SINH ẢNH B4 - SG-DAR TEXT + SKETCH (sd3_text_sketch.py)
+--------------------------------------------------------------------------------
+* Base Model            : stabilityai/stable-diffusion-3-medium-diffusers
+* ControlNet Model      : alimama-creative/SD3-Controlnet-Softedge
+* Độ phân giải ảnh      : 1024 x 1024
+* Số bước khử nhiễu     : 28 bước (num_inference_steps)
+* Guidance Scale (CFG)  : 7.0
+* Max Token (T5 Text)   : 512 tokens
+* Cường độ ControlNet   : cond_scale = 0.5 (Mức độ bám theo nét vẽ phác thảo)
+* Khung bước áp dụng ControlNet:
+  - control_guidance_start: 0.0 (Áp dụng ControlNet ngay từ bước 0%)
+  - control_guidance_end  : 0.7 (Ngắt ControlNet ở 70% số bước, 30% bước cuối để SD3 tự do làm nét chi tiết chân thực)
+* Bán kính làm mượt nét : blur_radius = 0.6 (Làm mềm viền nét vẽ Softedge)
+* Kiểu dữ liệu          : torch.bfloat16
+* Random Seed           : 42
+* Negative Prompt       : "low quality, blurry, deformed, noisy, grainy, bad anatomy, artifacts, cut off"
+================================================================================
