@@ -1,8 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# Script tự động Build & Run Container cho SD 3.5 VisDial Baseline
-# Quy định naming: <Nhóm>_<task>-<user>_<model>_<version>
+# Script tự động Build & Run Container cho SD 3.5 VisDial Pipeline
 # ==============================================================================
 
 IMAGE_NAME="aiclub_visdial-core_baotg_sd35_v1"
@@ -18,7 +17,7 @@ echo "🔧 Building Docker Image: ${IMAGE_NAME}..."
 echo "--------------------------------------------------------"
 docker build -t ${IMAGE_NAME} .
 
-# 2. Chọn GPU sử dụng (Mặc định chọn GPU 0 - NVIDIA RTX 3060 12GB)
+# 2. Chọn GPU sử dụng (Mặc định chọn GPU 0)
 GPU_IDS="${1:-0}"
 
 echo "--------------------------------------------------------"
@@ -39,8 +38,5 @@ docker run --gpus "\"device=${GPU_IDS}\"" \
   python3 sd3_5_visdial_baseline.py \
     --model_id "stabilityai/stable-diffusion-3.5-medium" \
     --dtype "bfloat16" \
-    --cpu_offload \
-    --skip_t5 \
     --skip_existing \
-    --output_dir ./generated_images \
-    --log_csv generation_log.csv
+    --output_dir ./generated_images

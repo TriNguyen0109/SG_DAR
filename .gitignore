@@ -1,0 +1,19 @@
+# Byte-compiled / Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+
+# IDE & Cache
+.vscode/
+.idea/
+.cache/
+
+# Generated Output & Logs
+generated_images/
+generated_images_baseline/
+generated_images_sketch/
+*.log
+*.csv

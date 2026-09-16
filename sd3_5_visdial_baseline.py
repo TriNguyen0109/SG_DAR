@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Baseline Python Script for Stable Diffusion 3.5 Text-to-Image Generation
-Dataset: VisDial v1.0 Queries (JSON format)
+Stable Diffusion 3.5 VisDial Baseline Image Generation Script (Text-Only)
 
-Output format:
-    {dialog_idx}_{turn_idx}.jpg (e.g. 0_0.jpg, 0_1.jpg, ..., 0_10.jpg, 1_0.jpg, ...)
+Generates images purely from text dialog prompts using Stable Diffusion 3.5.
+Ignores sketch inputs even if present in the JSON dataset file.
 
 Features:
-- Hugging Face `diffusers` integration for SD 3.5 (Medium / Large / Large Turbo)
+- Pure Text-to-Image baseline generation
+- Real-time progress tracking (Current Image / Total Images, Percentage %, Time per Image, Average Time & ETA)
+- Hugging Face `diffusers` integration for SD 3.5 (Medium / Large)
 - Flexible CLI parameters (steps, guidance scale, precision, resolution, random seed)
-- Memory optimization options (CPU offload, bfloat16/float16)
+- Flexible JSON dialog parsing (extracts text prompt from string list or dict format)
 - Resumable generation (--skip_existing)
 - Range filtering (--start_idx, --end_idx, --max_dialogs)
-- Dry-run / Mock mode (--dry_run) to test without needing a GPU / model download
-- CSV metadata logger
+- Fast dry-run / Mock mode (--dry_run) for format verification without GPU/weights
 """
 
 import os
@@ -23,10 +23,6 @@ import time
 import argparse
 import logging
 from pathlib import Path
-try:
-    import torch
-except ImportError:
-    torch = None
 
 # Set up logging
 logging.basicConfig(
@@ -37,7 +33,7 @@ logging.basicConfig(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run Stable Diffusion 3.5 on VisDial text dialogs to generate images."
+        description="Run Stable Diffusion 3.5 Text-Only Baseline on VisDial text dialogs."
     )
     
     # Input/Output paths
@@ -50,14 +46,8 @@ def parse_args():
     parser.add_argument(
         "--output_dir", 
         type=str, 
-        default="./generated_images",
+        default="./generated_images_baseline",
         help="Directory where generated images will be saved."
-    )
-    parser.add_argument(
-        "--log_csv", 
-        type=str, 
-        default="generation_log.csv",
-        help="Path to CSV file to log image generation details."
     )
     
     # Model configuration
@@ -65,7 +55,7 @@ def parse_args():
         "--model_id", 
         type=str, 
         default="stabilityai/stable-diffusion-3.5-medium",
-        help="Hugging Face model ID (e.g., stabilityai/stable-diffusion-3.5-medium, stabilityai/stable-diffusion-3.5-large)."
+        help="Hugging Face model ID."
     )
     parser.add_argument(
         "--device", 
@@ -78,86 +68,28 @@ def parse_args():
         type=str, 
         choices=["bfloat16", "float16", "float32"], 
         default="bfloat16",
-        help="Torch data type for model weights (bfloat16 recommended for SD3.5)."
-    )
-    parser.add_argument(
-        "--cpu_offload",
-        action="store_true",
-        help="Enable model CPU offloading to save GPU VRAM."
-    )
-    parser.add_argument(
-        "--skip_t5",
-        action="store_true",
-        help="Skip downloading/loading T5-XXL text encoder (text_encoder_3) to save disk space (~19.6GB) and VRAM."
+        help="Torch data type for model weights."
     )
     parser.add_argument(
         "--hf_token",
         type=str,
         default=os.environ.get("HF_TOKEN"),
-        help="Hugging Face User Access Token for gated models (or set HF_TOKEN env var)."
+        help="Hugging Face User Access Token for gated models."
     )
     
     # Generation hyperparameters
-    parser.add_argument(
-        "--height", 
-        type=int, 
-        default=1024,
-        help="Image height in pixels."
-    )
-    parser.add_argument(
-        "--width", 
-        type=int, 
-        default=1024,
-        help="Image width in pixels."
-    )
-    parser.add_argument(
-        "--num_inference_steps", 
-        type=int, 
-        default=28,
-        help="Number of denoising inference steps."
-    )
-    parser.add_argument(
-        "--guidance_scale", 
-        type=float, 
-        default=4.5,
-        help="Classifier-Free Guidance (CFG) scale."
-    )
-    parser.add_argument(
-        "--seed", 
-        type=int, 
-        default=42,
-        help="Random seed for image generation."
-    )
+    parser.add_argument("--height", type=int, default=1024, help="Image height in pixels.")
+    parser.add_argument("--width", type=int, default=1024, help="Image width in pixels.")
+    parser.add_argument("--num_inference_steps", type=int, default=28, help="Number of denoising inference steps.")
+    parser.add_argument("--guidance_scale", type=float, default=4.5, help="Classifier-Free Guidance (CFG) scale.")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     
     # Execution & subset controls
-    parser.add_argument(
-        "--start_idx", 
-        type=int, 
-        default=0,
-        help="Starting dialog index in JSON array."
-    )
-    parser.add_argument(
-        "--end_idx", 
-        type=int, 
-        default=None,
-        help="Ending dialog index in JSON array (exclusive)."
-    )
-    parser.add_argument(
-        "--max_dialogs", 
-        type=int, 
-        default=None,
-        help="Maximum number of dialog items to process."
-    )
-    parser.add_argument(
-        "--skip_existing", 
-        action="store_true",
-        help="Skip generation if target image file already exists."
-    )
-    parser.add_argument(
-        "--dry_run", 
-        action="store_true",
-        help="Run script in dry-run mode without loading PyTorch or Diffusers model."
-    )
+    parser.add_argument("--start_idx", type=int, default=0, help="Starting dialog index in JSON array.")
+    parser.add_argument("--end_idx", type=int, default=None, help="Ending dialog index in JSON array (exclusive).")
+    parser.add_argument("--max_dialogs", type=int, default=None, help="Maximum number of dialog items to process.")
+    parser.add_argument("--skip_existing", action="store_true", help="Skip generation if output file already exists.")
+    parser.add_argument("--dry_run", action="store_true", help="Run script in dry-run mode without loading model weights.")
     
     return parser.parse_args()
 
@@ -167,32 +99,27 @@ def load_visdial_data(json_path):
     if not os.path.exists(json_path):
         raise FileNotFoundError(f"JSON file not found at: {json_path}")
     
-    logging.info(f"Loading data from {json_path}...")
+    logging.info(f"Loading dataset from {json_path}...")
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     
-    logging.info(f"Successfully loaded {len(data)} dialog items.")
+    logging.info(f"Loaded {len(data)} dialog items.")
     return data
 
 
 def init_sd35_pipeline(args):
-    """
-    Initializes Stable Diffusion 3.5 Pipeline via diffusers.
-    Supports dry-run fallback if dependencies or GPU are unavailable.
-    """
+    """Initializes Stable Diffusion 3.5 Text-to-Image Pipeline via diffusers."""
     if args.dry_run:
-        logging.info("DRY RUN MODE: Skipping PyTorch / Diffusers model initialization.")
+        logging.info("DRY RUN MODE: Skipping PyTorch and Diffusers model initialization.")
         return None, None
 
     try:
         import torch
         from diffusers import StableDiffusion3Pipeline
     except ImportError as e:
-        logging.error("Failed to import torch or diffusers. Please install requirements:")
-        logging.error("pip install torch diffusers transformers accelerate sentencepiece sfmath")
+        logging.error("Failed to import torch or diffusers. Please install dependencies.")
         raise e
 
-    # Determine torch dtype
     dtype_map = {
         "bfloat16": torch.bfloat16,
         "float16": torch.float16,
@@ -200,114 +127,106 @@ def init_sd35_pipeline(args):
     }
     torch_dtype = dtype_map[args.dtype]
 
-    logging.info(f"Loading Stable Diffusion 3.5 model '{args.model_id}' with dtype={args.dtype}...")
-    
-    pipeline_kwargs = {
-        "torch_dtype": torch_dtype,
-        "token": args.hf_token
-    }
-    if args.skip_t5:
-        logging.info("Skipping T5-XXL text encoder (text_encoder_3) to save disk space (~19.6GB) and VRAM...")
-        pipeline_kwargs["text_encoder_3"] = None
-        pipeline_kwargs["tokenizer_3"] = None
-
+    logging.info(f"Loading Stable Diffusion 3.5 Text-to-Image model '{args.model_id}' ({args.dtype})...")
     pipe = StableDiffusion3Pipeline.from_pretrained(
         args.model_id,
-        **pipeline_kwargs
+        torch_dtype=torch_dtype,
+        token=args.hf_token
     )
-    
-    if args.cpu_offload:
-        logging.info("Enabling Model CPU Offloading...")
-        pipe.enable_model_cpu_offload()
-    else:
-        pipe = pipe.to(args.device)
-        
+    pipe = pipe.to(args.device)
     logging.info("Pipeline loaded successfully.")
     
-    # Base generator for seed
-    generator = torch.Generator(device=args.device if not args.cpu_offload else "cuda").manual_seed(args.seed)
-    
+    generator = torch.Generator(device=args.device).manual_seed(args.seed)
     return pipe, generator
 
 
-def create_dummy_image(text, width=1024, height=1024, save_path=None):
-    """Helper to generate a placeholder image during dry-run mode."""
+def create_dummy_image(prompt_text, width=1024, height=1024, save_path=None):
+    """Generates a placeholder image during dry-run mode."""
     try:
         from PIL import Image, ImageDraw
         img = Image.new("RGB", (width, height), color=(30, 41, 59))
         draw = ImageDraw.Draw(img)
-        draw.text((30, 30), f"DRY RUN PLACEHOLDER\n\nPath: {save_path}\nPrompt: {text[:100]}...", fill=(255, 255, 255))
+        draw.text((30, 30), f"DRY RUN BASELINE (TEXT-ONLY)\n\nSave: {save_path}\nPrompt: {prompt_text[:100]}...", fill=(255, 255, 255))
         if save_path:
             img.save(save_path)
     except ImportError:
-        # If PIL is not available, write a plain empty file
         if save_path:
             with open(save_path, "w") as f:
-                f.write(f"Placeholder for {text}")
+                f.write(f"Dry run placeholder for prompt: {prompt_text}")
+
+
+def format_time(seconds):
+    """Formats seconds into human-readable string (e.g., '2m 15s' or '45.2s')."""
+    if seconds < 60:
+        return f"{seconds:.2f}s"
+    minutes = int(seconds // 60)
+    rem_sec = int(seconds % 60)
+    return f"{minutes}m {rem_sec}s"
 
 
 def main():
     args = parse_args()
-    
-    # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
-    
-    # Prepare CSV logger
-    csv_exists = os.path.exists(args.log_csv)
-    log_file = open(args.log_csv, "a" if csv_exists else "w", encoding="utf-8", newline="")
-    import csv
-    csv_writer = csv.writer(log_file)
-    if not csv_exists:
-        csv_writer.writerow(["dialog_idx", "turn_idx", "image_filename", "prompt", "generation_time_sec", "timestamp"])
 
-    # Load dataset
     data = load_visdial_data(args.json_path)
     
-    # Determine slice range
     start_idx = args.start_idx
     end_idx = len(data) if args.end_idx is None else min(args.end_idx, len(data))
     if args.max_dialogs is not None:
         end_idx = min(start_idx + args.max_dialogs, end_idx)
         
     target_data = data[start_idx:end_idx]
-    logging.info(f"Processing dialog range: [{start_idx} to {end_idx - 1}] (Total: {len(target_data)} dialog items)")
     
-    # Initialize pipeline
+    # Calculate total expected images across all dialog turns
+    total_expected_images = sum(len(item.get("dialog", [])) for item in target_data)
+    
+    logging.info("=" * 60)
+    logging.info(f"Target Dialog Range : [{start_idx} to {end_idx - 1}] ({len(target_data)} dialog items)")
+    logging.info(f"Total Images to Process : {total_expected_images} images")
+    logging.info("=" * 60)
+    
     pipe, generator = init_sd35_pipeline(args)
     
-    total_images_generated = 0
-    total_images_skipped = 0
-    start_total_time = time.time()
+    total_generated = 0
+    total_skipped = 0
+    current_image_idx = 0
+    start_time = time.time()
     
-    # Iterate through dialog objects
     for local_i, item in enumerate(target_data):
         dialog_idx = start_idx + local_i
         dialog_turns = item.get("dialog", [])
         
-        logging.info(f"--- Dialog [{dialog_idx}/{end_idx - 1}] - Total turns: {len(dialog_turns)} ---")
+        logging.info(f"\n>>> Processing Dialog [{dialog_idx}/{end_idx - 1}] ({len(dialog_turns)} turns) <<<")
         
-        for turn_idx, prompt in enumerate(dialog_turns):
+        for turn_idx, turn_item in enumerate(dialog_turns):
+            current_image_idx += 1
+            progress_pct = (current_image_idx / total_expected_images) * 100
+            
+            # Extract TEXT ONLY (ignore sketch even if present in JSON dict)
+            if isinstance(turn_item, dict):
+                prompt = turn_item.get("text", "")
+            else:
+                prompt = str(turn_item)
+                
             img_name = f"{dialog_idx}_{turn_idx}.jpg"
             img_path = os.path.join(args.output_dir, img_name)
             
-            # Skip existing files if requested
             if args.skip_existing and os.path.exists(img_path):
-                logging.info(f"Skipping existing file: {img_name}")
-                total_images_skipped += 1
+                logging.info(f"[{current_image_idx}/{total_expected_images} - {progress_pct:.1f}%] Skipping existing file: {img_name}")
+                total_skipped += 1
                 continue
             
             t0 = time.time()
-            
             if args.dry_run:
-                # Dry run generation
                 create_dummy_image(prompt, width=args.width, height=args.height, save_path=img_path)
-                gen_time = round(time.time() - t0, 4)
-                logging.info(f"[DRY-RUN] Saved: {img_name} | Prompt: '{prompt[:60]}...'")
+                gen_time = time.time() - t0
+                logging.info(
+                    f"[DRY-RUN {current_image_idx}/{total_expected_images} ({progress_pct:.1f}%)] "
+                    f"Saved: '{img_name}' in {gen_time:.4f}s | Prompt: '{prompt[:50]}...'"
+                )
             else:
-                # Actual SD 3.5 Generation
-                logging.info(f"Generating [{dialog_idx}_{turn_idx}.jpg]...")
+                logging.info(f"[{current_image_idx}/{total_expected_images} ({progress_pct:.1f}%)] Generating '{img_name}'...")
                 try:
-                    # Generate image
                     output = pipe(
                         prompt=prompt,
                         height=args.height,
@@ -316,40 +235,33 @@ def main():
                         guidance_scale=args.guidance_scale,
                         generator=generator
                     )
-                    image = output.images[0]
-                    image.save(img_path, quality=95)
-                    gen_time = round(time.time() - t0, 2)
-                    logging.info(f"Successfully saved {img_name} in {gen_time}s")
+                    output.images[0].save(img_path, quality=95)
+                    gen_time = time.time() - t0
+                    
+                    elapsed_so_far = time.time() - start_time
+                    avg_time_per_img = elapsed_so_far / (total_generated + 1)
+                    remaining_imgs = total_expected_images - current_image_idx
+                    eta_seconds = avg_time_per_img * remaining_imgs
+                    
+                    logging.info(
+                        f"✓ Saved '{img_name}' in {format_time(gen_time)} | "
+                        f"Avg: {avg_time_per_img:.2f}s/img | ETA: {format_time(eta_seconds)}"
+                    )
                 except Exception as e:
-                    logging.error(f"Error generating {img_name}: {e}")
-                    if torch and torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                    logging.error(f"❌ Error generating '{img_name}': {e}")
                     continue
-                
-                if torch and torch.cuda.is_available():
-                    torch.cuda.empty_cache()
             
-            # Record log
-            csv_writer.writerow([
-                dialog_idx, 
-                turn_idx, 
-                img_name, 
-                prompt, 
-                gen_time if 'gen_time' in locals() else 0, 
-                time.strftime("%Y-%m-%d %H:%M:%S")
-            ])
-            log_file.flush()
-            total_images_generated += 1
+            total_generated += 1
 
-    log_file.close()
-    total_elapsed = round(time.time() - start_total_time, 2)
-    logging.info("=" * 60)
-    logging.info(f"Execution complete!")
-    logging.info(f"Total images generated: {total_images_generated}")
-    logging.info(f"Total images skipped: {total_images_skipped}")
-    logging.info(f"Total elapsed time: {total_elapsed} seconds")
-    logging.info(f"Output directory: {os.path.abspath(args.output_dir)}")
-    logging.info(f"Log CSV: {os.path.abspath(args.log_csv)}")
+    elapsed = time.time() - start_time
+    logging.info("\n" + "=" * 60)
+    logging.info("Execution Complete!")
+    logging.info(f"Total Images Generated : {total_generated}")
+    logging.info(f"Total Images Skipped   : {total_skipped}")
+    logging.info(f"Total Time Elapsed     : {format_time(elapsed)}")
+    if total_generated > 0:
+        logging.info(f"Average Speed Per Image: {elapsed / total_generated:.2f}s/image")
+    logging.info(f"Output Directory       : {os.path.abspath(args.output_dir)}")
     logging.info("=" * 60)
 
 if __name__ == "__main__":
