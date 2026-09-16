@@ -1,0 +1,18 @@
+# Core Deep Learning & PyTorch
+torch
+torchvision
+
+# Hugging Face Diffusers & Model Pipelines for SD 3.5
+diffusers>=0.30.0
+transformers>=4.44.0
+accelerate>=0.33.0
+huggingface_hub
+
+# Model Tokenizers & Serialization
+sentencepiece
+protobuf
+
+# Utilities & Data Processing
+Pillow
+pandas
+tqdm
