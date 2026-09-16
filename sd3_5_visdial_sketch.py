@@ -63,6 +63,11 @@ def parse_args():
         help="Hugging Face model ID."
     )
     parser.add_argument(
+        "--use_flux",
+        action="store_true",
+        help="Use FLUX Img2Img pipeline instead of Stable Diffusion 3.5."
+    )
+    parser.add_argument(
         "--device", 
         type=str, 
         default="cuda",
@@ -86,15 +91,29 @@ def parse_args():
         action="store_true",
         help="Enable Diffusers model CPU offloading to save VRAM."
     )
+    parser.add_argument(
+        "--no_cpu_offload",
+        action="store_true",
+        help="Force disable CPU offloading and keep all model weights in GPU VRAM."
+    )
+    parser.add_argument(
+        "--lora_path",
+        type=str,
+        default="./models/sketch_to_image_klein_4b/sketch_to_image_klein_4b.safetensors",
+        help="Path or directory to custom LoRA weights (e.g. ./models/sketch_to_image_klein_4b/sketch_to_image_klein_4b.safetensors)."
+    )
     
     # Generation hyperparameters
+    parser.add_argument("--batch_size", type=int, default=2, help="Batch size for dual-input prompt & sketch inference.")
     parser.add_argument("--height", type=int, default=1024, help="Image height in pixels.")
     parser.add_argument("--width", type=int, default=1024, help="Image width in pixels.")
-    parser.add_argument("--num_inference_steps", type=int, default=28, help="Number of denoising inference steps.")
-    parser.add_argument("--guidance_scale", type=float, default=6.0, help="Classifier-Free Guidance (CFG) scale.")
-    parser.add_argument("--strength", type=float, default=0.90, help="Sketch conditioning / Img2Img transformation strength.")
-    parser.add_argument("--sketch_mode", type=str, choices=["neutral_gray", "binary_black", "invert", "raw"], default="neutral_gray", help="Sketch preprocessing mode (neutral_gray prevents dark/white color bias).")
+    parser.add_argument("--num_inference_steps", type=int, default=18, help="Number of denoising inference steps.")
+    parser.add_argument("--guidance_scale", type=float, default=8.5, help="Classifier-Free Guidance (CFG) scale for rich vibrant colors.")
+    parser.add_argument("--strength", type=float, default=0.85, help="Sketch conditioning / Img2Img transformation strength.")
+    parser.add_argument("--sketch_mode", type=str, choices=["neutral_gray", "binary_black", "invert", "raw"], default="neutral_gray", help="Sketch preprocessing mode (neutral_gray balances background tones for vibrant VAE colors).")
     parser.add_argument("--lineart_threshold", type=int, default=220, help="Grayscale threshold (0-255) for lineart binarization.")
+    parser.add_argument("--prompt_prefix", type=str, default="a beautiful masterpiece, professional photograph, 8k resolution, vibrant vivid saturated colors, sharp focus, high contrast, cinematic lighting, ", help="Prefix to enforce photorealism and rich colors like baseline.")
+    parser.add_argument("--negative_prompt", type=str, default="monochrome, grayscale, black and white, line art, sketch lines, cartoon, anime, 2d, desaturated, washed out, low contrast, dark tones, blurry, bad anatomy, draft", help="Negative prompt to prevent monochrome/sketch look.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     
     # Execution & subset controls
@@ -129,6 +148,9 @@ def init_sd35_pipeline(args):
     try:
         import torch
         from diffusers import StableDiffusion3Img2ImgPipeline
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
     except ImportError as e:
         logging.error("Failed to import torch or diffusers. Please install dependencies.")
         raise e
@@ -140,14 +162,25 @@ def init_sd35_pipeline(args):
     }
     torch_dtype = dtype_map[args.dtype]
 
-    logging.info(f"Loading Stable Diffusion Img2Img model '{args.model_id}' ({args.dtype})...")
-    pipe = StableDiffusion3Img2ImgPipeline.from_pretrained(
-        args.model_id,
-        torch_dtype=torch_dtype,
-        token=args.hf_token
-    )
+    is_flux = "flux" in args.model_id.lower() or args.use_flux
+    if is_flux:
+        from diffusers import FluxImg2ImgPipeline
+        logging.info(f"Loading FLUX Img2Img model '{args.model_id}' ({args.dtype})...")
+        pipe = FluxImg2ImgPipeline.from_pretrained(
+            args.model_id,
+            torch_dtype=torch_dtype,
+            token=args.hf_token
+        )
+    else:
+        from diffusers import StableDiffusion3Img2ImgPipeline
+        logging.info(f"Loading Stable Diffusion Img2Img model '{args.model_id}' ({args.dtype})...")
+        pipe = StableDiffusion3Img2ImgPipeline.from_pretrained(
+            args.model_id,
+            torch_dtype=torch_dtype,
+            token=args.hf_token
+        )
     should_offload = args.cpu_offload
-    if not should_offload and args.device == "cuda" and torch.cuda.is_available():
+    if not args.no_cpu_offload and not should_offload and args.device == "cuda" and torch.cuda.is_available():
         try:
             free_mem, total_mem = torch.cuda.mem_get_info()
             if total_mem < 20 * (1024 ** 3):
@@ -155,6 +188,23 @@ def init_sd35_pipeline(args):
                 logging.info(f"Detected GPU VRAM ({total_mem / (1024**3):.2f} GB) < 20GB. Automatically enabling CPU Offloading to prevent OOM.")
         except Exception:
             pass
+
+    if args.no_cpu_offload:
+        should_offload = False
+        logging.info("Forced disabling CPU Offloading (--no_cpu_offload). Loading full model directly into GPU VRAM.")
+
+    if args.lora_path and os.path.exists(args.lora_path):
+        logging.info(f"Loading custom LoRA weights from '{args.lora_path}'...")
+        try:
+            if os.path.isfile(args.lora_path):
+                dir_name = os.path.dirname(args.lora_path) or "."
+                file_name = os.path.basename(args.lora_path)
+                pipe.load_lora_weights(dir_name, weight_name=file_name)
+            else:
+                pipe.load_lora_weights(args.lora_path)
+            logging.info("✓ LoRA weights loaded successfully.")
+        except Exception as e:
+            logging.warning(f"Failed to load LoRA weights from '{args.lora_path}': {e}")
 
     if should_offload:
         logging.info("Enabling Model CPU Offloading to optimize VRAM usage...")
@@ -203,119 +253,146 @@ def main():
         
     target_data = data[start_idx:end_idx]
     
-    # Calculate total expected images across all dialog turns
-    total_expected_images = sum(len(item.get("dialog", [])) for item in target_data)
-    
-    logging.info("=" * 60)
-    logging.info(f"Target Dialog Range : [{start_idx} to {end_idx - 1}] ({len(target_data)} dialog items)")
-    logging.info(f"Total Images to Process : {total_expected_images} images")
-    logging.info("=" * 60)
-    
-    pipe, generator = init_sd35_pipeline(args)
-    
-    total_generated = 0
-    total_skipped = 0
-    current_image_idx = 0
-    start_time = time.time()
-    
+    # Flatten all generation tasks across dialogs
+    all_tasks = []
     for local_i, item in enumerate(target_data):
         dialog_idx = start_idx + local_i
         dialog_turns = item.get("dialog", [])
-        
-        logging.info(f"\n>>> Processing Dialog [{dialog_idx}/{end_idx - 1}] ({len(dialog_turns)} turns) <<<")
-        
         for turn_idx, turn_item in enumerate(dialog_turns):
-            current_image_idx += 1
-            progress_pct = (current_image_idx / total_expected_images) * 100
-            
             if isinstance(turn_item, dict):
                 prompt = turn_item.get("text", "")
                 sketch_path = turn_item.get("sketch", "")
             else:
                 prompt = str(turn_item)
                 sketch_path = ""
-                
             img_name = f"{dialog_idx}_{turn_idx}.jpg"
             img_path = os.path.join(args.output_dir, img_name)
-            
-            if args.skip_existing and os.path.exists(img_path):
-                logging.info(f"[{current_image_idx}/{total_expected_images} - {progress_pct:.1f}%] Skipping existing file: {img_name}")
-                total_skipped += 1
-                continue
-            
-            t0 = time.time()
-            if args.dry_run:
-                create_dummy_image(prompt, sketch_path, width=args.width, height=args.height, save_path=img_path)
-                gen_time = time.time() - t0
-                logging.info(
-                    f"[DRY-RUN {current_image_idx}/{total_expected_images} ({progress_pct:.1f}%)] "
-                    f"Saved: '{img_name}' in {gen_time:.4f}s | Sketch: {sketch_path} | Text: '{prompt[:40]}...'"
-                )
+            all_tasks.append({
+                "dialog_idx": dialog_idx,
+                "turn_idx": turn_idx,
+                "prompt": prompt,
+                "sketch_path": sketch_path,
+                "img_name": img_name,
+                "img_path": img_path
+            })
+
+    total_expected_images = len(all_tasks)
+    
+    logging.info("=" * 60)
+    logging.info(f"Target Dialog Range : [{start_idx} to {end_idx - 1}] ({len(target_data)} dialog items)")
+    logging.info(f"Total Images to Process : {total_expected_images} images")
+    logging.info(f"Batch Size : {args.batch_size}")
+    logging.info("=" * 60)
+    
+    pipe, generator = init_sd35_pipeline(args)
+    
+    total_generated = 0
+    total_skipped = 0
+    start_time = time.time()
+
+    pending_tasks = []
+    for t in all_tasks:
+        if args.skip_existing and os.path.exists(t["img_path"]):
+            total_skipped += 1
+        else:
+            pending_tasks.append(t)
+
+    if total_skipped > 0:
+        logging.info(f"Skipping {total_skipped} already existing images.")
+
+    current_image_idx = total_skipped
+    batch_size = max(1, args.batch_size)
+
+    def load_processed_sketch(sketch_path):
+        if sketch_path and os.path.exists(sketch_path) and Image:
+            raw_img = Image.open(sketch_path).convert("L")
+            thresh = args.lineart_threshold
+            if args.sketch_mode == "neutral_gray":
+                arr = np.array(raw_img)
+                proc = np.where(arr >= thresh, 128, 0).astype(np.uint8)
+                return Image.fromarray(proc).convert("RGB").resize((args.width, args.height))
+            elif args.sketch_mode == "binary_black":
+                binary_mask = raw_img.point(lambda p: 255 if p < thresh else 0)
+                return binary_mask.convert("RGB").resize((args.width, args.height))
+            elif args.sketch_mode == "invert":
+                img = raw_img.convert("RGB").resize((args.width, args.height))
+                if ImageOps:
+                    img = ImageOps.invert(img)
+                return img
             else:
-                logging.info(f"[{current_image_idx}/{total_expected_images} ({progress_pct:.1f}%)] Generating '{img_name}' using Text + Sketch ({sketch_path})...")
-                try:
-                    sketch_img = None
-                    if sketch_path and os.path.exists(sketch_path) and Image:
-                        raw_img = Image.open(sketch_path).convert("L")
-                        thresh = args.lineart_threshold
-                        
-                        if args.sketch_mode == "neutral_gray":
-                            # Background -> 128 (Neutral Gray, Zero-centered VAE Latent), Lines -> 0 (Dark stroke)
-                            arr = np.array(raw_img)
-                            proc = np.where(arr >= thresh, 128, 0).astype(np.uint8)
-                            sketch_img = Image.fromarray(proc).convert("RGB").resize((args.width, args.height))
-                        elif args.sketch_mode == "binary_black":
-                            # Background -> 0 (Pitch Black), Lines -> 255 (Bright White)
-                            binary_mask = raw_img.point(lambda p: 255 if p < thresh else 0)
-                            sketch_img = binary_mask.convert("RGB").resize((args.width, args.height))
-                        elif args.sketch_mode == "invert":
-                            # Inverted RGB sketch
-                            sketch_img = raw_img.convert("RGB").resize((args.width, args.height))
-                            if ImageOps:
-                                sketch_img = ImageOps.invert(sketch_img)
-                        else:
-                            # Raw original sketch
-                            sketch_img = raw_img.convert("RGB").resize((args.width, args.height))
-                    
-                    if sketch_img is not None:
-                        output = pipe(
-                            prompt=prompt,
-                            image=sketch_img,
-                            strength=args.strength,
-                            height=args.height,
-                            width=args.width,
-                            num_inference_steps=args.num_inference_steps,
-                            guidance_scale=args.guidance_scale,
-                            generator=generator
-                        )
-                    else:
-                        logging.warning(f"Sketch file not found at '{sketch_path}'. Falling back to prompt text only.")
-                        output = pipe(
-                            prompt=prompt,
-                            height=args.height,
-                            width=args.width,
-                            num_inference_steps=args.num_inference_steps,
-                            guidance_scale=args.guidance_scale,
-                            generator=generator
-                        )
-                        
-                    output.images[0].save(img_path, quality=95)
-                    gen_time = time.time() - t0
-                    
-                    elapsed_so_far = time.time() - start_time
-                    avg_time_per_img = elapsed_so_far / (total_generated + 1)
-                    remaining_imgs = total_expected_images - current_image_idx
-                    eta_seconds = avg_time_per_img * remaining_imgs
-                    
-                    logging.info(
-                        f"✓ Saved '{img_name}' in {format_time(gen_time)} | "
-                        f"Avg: {avg_time_per_img:.2f}s/img | ETA: {format_time(eta_seconds)}"
-                    )
-                except Exception as e:
-                    logging.error(f"❌ Error generating '{img_name}': {e}")
-                    continue
-            
-            total_generated += 1
+                return raw_img.convert("RGB").resize((args.width, args.height))
+        return None
+
+    for i in range(0, len(pending_tasks), batch_size):
+        chunk = pending_tasks[i:i + batch_size]
+        prompts = [t["prompt"] for t in chunk]
+        batch_names = [t["img_name"] for t in chunk]
+
+        t0 = time.time()
+        if args.dry_run:
+            for task in chunk:
+                create_dummy_image(task["prompt"], task["sketch_path"], width=args.width, height=args.height, save_path=task["img_path"])
+            gen_time = time.time() - t0
+            current_image_idx += len(chunk)
+            total_generated += len(chunk)
+            progress_pct = (current_image_idx / total_expected_images) * 100
+            logging.info(
+                f"[DRY-RUN {current_image_idx}/{total_expected_images} ({progress_pct:.1f}%)] "
+                f"Saved batch {batch_names} in {gen_time:.4f}s"
+            )
+        else:
+            current_image_idx += len(chunk)
+            progress_pct = (current_image_idx / total_expected_images) * 100
+            logging.info(f"[{current_image_idx}/{total_expected_images} ({progress_pct:.1f}%)] Generating batch: {batch_names}...")
+            try:
+                sketch_imgs = [load_processed_sketch(t["sketch_path"]) for t in chunk]
+                # If any sketch is missing, fallback to neutral gray image placeholder
+                fallback_blank = Image.new("RGB", (args.width, args.height), color=(128, 128, 128)) if Image else None
+                input_imgs = [s if s is not None else fallback_blank for s in sketch_imgs]
+
+                full_prompts = [args.prompt_prefix + p for p in prompts]
+                prompt_arg = full_prompts[0] if len(full_prompts) == 1 else full_prompts
+                img_arg = input_imgs[0] if len(input_imgs) == 1 else input_imgs
+
+                neg_prompts = [args.negative_prompt] * len(chunk)
+                neg_arg = neg_prompts[0] if len(neg_prompts) == 1 else neg_prompts
+
+                import torch
+                batch_gens = [torch.Generator(device=args.device).manual_seed(args.seed + t["dialog_idx"]) for t in chunk]
+                gen_arg = batch_gens[0] if len(batch_gens) == 1 else batch_gens
+
+                kwargs = {
+                    "prompt": prompt_arg,
+                    "image": img_arg,
+                    "strength": args.strength,
+                    "height": args.height,
+                    "width": args.width,
+                    "num_inference_steps": args.num_inference_steps,
+                    "guidance_scale": args.guidance_scale,
+                    "generator": gen_arg
+                }
+                if args.negative_prompt:
+                    kwargs["negative_prompt"] = neg_arg
+
+                output = pipe(**kwargs)
+                for idx_in_batch, out_img in enumerate(output.images):
+                    out_img.save(chunk[idx_in_batch]["img_path"], quality=95)
+
+                gen_time = time.time() - t0
+                total_generated += len(chunk)
+
+                elapsed_so_far = time.time() - start_time
+                avg_time_per_img = elapsed_so_far / total_generated
+                remaining_imgs = total_expected_images - current_image_idx
+                eta_seconds = avg_time_per_img * remaining_imgs
+
+                logging.info(
+                    f"✓ Saved batch {batch_names} in {format_time(gen_time)} | "
+                    f"Avg: {avg_time_per_img:.2f}s/img | ETA: {format_time(eta_seconds)}"
+                )
+            except Exception as e:
+                logging.error(f"❌ Error generating batch {batch_names}: {e}")
+                continue
 
     elapsed = time.time() - start_time
     logging.info("\n" + "=" * 60)

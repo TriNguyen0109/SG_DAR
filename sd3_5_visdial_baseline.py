@@ -81,11 +81,17 @@ def parse_args():
         action="store_true",
         help="Enable Diffusers model CPU offloading to save VRAM."
     )
+    parser.add_argument(
+        "--no_cpu_offload",
+        action="store_true",
+        help="Force disable CPU offloading and keep all model weights in GPU VRAM."
+    )
     
     # Generation hyperparameters
+    parser.add_argument("--batch_size", type=int, default=4, help="Batch size for prompt inference.")
     parser.add_argument("--height", type=int, default=1024, help="Image height in pixels.")
     parser.add_argument("--width", type=int, default=1024, help="Image width in pixels.")
-    parser.add_argument("--num_inference_steps", type=int, default=28, help="Number of denoising inference steps.")
+    parser.add_argument("--num_inference_steps", type=int, default=14, help="Number of denoising inference steps.")
     parser.add_argument("--guidance_scale", type=float, default=6.0, help="Classifier-Free Guidance (CFG) scale.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     
@@ -121,6 +127,9 @@ def init_sd35_pipeline(args):
     try:
         import torch
         from diffusers import StableDiffusion3Pipeline
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
     except ImportError as e:
         logging.error("Failed to import torch or diffusers. Please install dependencies.")
         raise e
@@ -139,7 +148,7 @@ def init_sd35_pipeline(args):
         token=args.hf_token
     )
     should_offload = args.cpu_offload
-    if not should_offload and args.device == "cuda" and torch.cuda.is_available():
+    if not args.no_cpu_offload and not should_offload and args.device == "cuda" and torch.cuda.is_available():
         try:
             free_mem, total_mem = torch.cuda.mem_get_info()
             if total_mem < 20 * (1024 ** 3):
@@ -147,6 +156,10 @@ def init_sd35_pipeline(args):
                 logging.info(f"Detected GPU VRAM ({total_mem / (1024**3):.2f} GB) < 20GB. Automatically enabling CPU Offloading to prevent OOM.")
         except Exception:
             pass
+
+    if args.no_cpu_offload:
+        should_offload = False
+        logging.info("Forced disabling CPU Offloading (--no_cpu_offload). Loading full model directly into GPU VRAM.")
 
     if should_offload:
         logging.info("Enabling Model CPU Offloading to optimize VRAM usage...")
@@ -196,12 +209,32 @@ def main():
         
     target_data = data[start_idx:end_idx]
     
-    # Calculate total expected images across all dialog turns
-    total_expected_images = sum(len(item.get("dialog", [])) for item in target_data)
+    # Flatten all generation tasks across dialogs
+    all_tasks = []
+    for local_i, item in enumerate(target_data):
+        dialog_idx = start_idx + local_i
+        dialog_turns = item.get("dialog", [])
+        for turn_idx, turn_item in enumerate(dialog_turns):
+            if isinstance(turn_item, dict):
+                prompt = turn_item.get("text", "")
+            else:
+                prompt = str(turn_item)
+            img_name = f"{dialog_idx}_{turn_idx}.jpg"
+            img_path = os.path.join(args.output_dir, img_name)
+            all_tasks.append({
+                "dialog_idx": dialog_idx,
+                "turn_idx": turn_idx,
+                "prompt": prompt,
+                "img_name": img_name,
+                "img_path": img_path
+            })
+
+    total_expected_images = len(all_tasks)
     
     logging.info("=" * 60)
     logging.info(f"Target Dialog Range : [{start_idx} to {end_idx - 1}] ({len(target_data)} dialog items)")
     logging.info(f"Total Images to Process : {total_expected_images} images")
+    logging.info(f"Batch Size : {args.batch_size}")
     logging.info("=" * 60)
     
     pipe, generator = init_sd35_pipeline(args)
@@ -210,67 +243,74 @@ def main():
     total_skipped = 0
     current_image_idx = 0
     start_time = time.time()
-    
-    for local_i, item in enumerate(target_data):
-        dialog_idx = start_idx + local_i
-        dialog_turns = item.get("dialog", [])
-        
-        logging.info(f"\n>>> Processing Dialog [{dialog_idx}/{end_idx - 1}] ({len(dialog_turns)} turns) <<<")
-        
-        for turn_idx, turn_item in enumerate(dialog_turns):
-            current_image_idx += 1
+
+    # Filter tasks if skip_existing is enabled
+    pending_tasks = []
+    for t in all_tasks:
+        if args.skip_existing and os.path.exists(t["img_path"]):
+            total_skipped += 1
+        else:
+            pending_tasks.append(t)
+
+    if total_skipped > 0:
+        logging.info(f"Skipping {total_skipped} already existing images.")
+
+    current_image_idx = total_skipped
+    batch_size = max(1, args.batch_size)
+
+    for i in range(0, len(pending_tasks), batch_size):
+        chunk = pending_tasks[i:i + batch_size]
+        prompts = [task["prompt"] for task in chunk]
+        batch_names = [task["img_name"] for task in chunk]
+
+        t0 = time.time()
+        if args.dry_run:
+            for task in chunk:
+                create_dummy_image(task["prompt"], width=args.width, height=args.height, save_path=task["img_path"])
+            gen_time = time.time() - t0
+            current_image_idx += len(chunk)
+            total_generated += len(chunk)
             progress_pct = (current_image_idx / total_expected_images) * 100
-            
-            # Extract TEXT ONLY (ignore sketch even if present in JSON dict)
-            if isinstance(turn_item, dict):
-                prompt = turn_item.get("text", "")
-            else:
-                prompt = str(turn_item)
-                
-            img_name = f"{dialog_idx}_{turn_idx}.jpg"
-            img_path = os.path.join(args.output_dir, img_name)
-            
-            if args.skip_existing and os.path.exists(img_path):
-                logging.info(f"[{current_image_idx}/{total_expected_images} - {progress_pct:.1f}%] Skipping existing file: {img_name}")
-                total_skipped += 1
-                continue
-            
-            t0 = time.time()
-            if args.dry_run:
-                create_dummy_image(prompt, width=args.width, height=args.height, save_path=img_path)
-                gen_time = time.time() - t0
-                logging.info(
-                    f"[DRY-RUN {current_image_idx}/{total_expected_images} ({progress_pct:.1f}%)] "
-                    f"Saved: '{img_name}' in {gen_time:.4f}s | Prompt: '{prompt[:50]}...'"
+            logging.info(
+                f"[DRY-RUN {current_image_idx}/{total_expected_images} ({progress_pct:.1f}%)] "
+                f"Saved batch {batch_names} in {gen_time:.4f}s"
+            )
+        else:
+            current_image_idx += len(chunk)
+            progress_pct = (current_image_idx / total_expected_images) * 100
+            logging.info(f"[{current_image_idx}/{total_expected_images} ({progress_pct:.1f}%)] Generating batch: {batch_names}...")
+            try:
+                if len(prompts) == 1:
+                    prompt_arg = prompts[0]
+                else:
+                    prompt_arg = prompts
+
+                output = pipe(
+                    prompt=prompt_arg,
+                    height=args.height,
+                    width=args.width,
+                    num_inference_steps=args.num_inference_steps,
+                    guidance_scale=args.guidance_scale,
+                    generator=generator
                 )
-            else:
-                logging.info(f"[{current_image_idx}/{total_expected_images} ({progress_pct:.1f}%)] Generating '{img_name}'...")
-                try:
-                    output = pipe(
-                        prompt=prompt,
-                        height=args.height,
-                        width=args.width,
-                        num_inference_steps=args.num_inference_steps,
-                        guidance_scale=args.guidance_scale,
-                        generator=generator
-                    )
-                    output.images[0].save(img_path, quality=95)
-                    gen_time = time.time() - t0
-                    
-                    elapsed_so_far = time.time() - start_time
-                    avg_time_per_img = elapsed_so_far / (total_generated + 1)
-                    remaining_imgs = total_expected_images - current_image_idx
-                    eta_seconds = avg_time_per_img * remaining_imgs
-                    
-                    logging.info(
-                        f"✓ Saved '{img_name}' in {format_time(gen_time)} | "
-                        f"Avg: {avg_time_per_img:.2f}s/img | ETA: {format_time(eta_seconds)}"
-                    )
-                except Exception as e:
-                    logging.error(f"❌ Error generating '{img_name}': {e}")
-                    continue
-            
-            total_generated += 1
+                for idx_in_batch, out_img in enumerate(output.images):
+                    out_img.save(chunk[idx_in_batch]["img_path"], quality=95)
+                
+                gen_time = time.time() - t0
+                total_generated += len(chunk)
+                
+                elapsed_so_far = time.time() - start_time
+                avg_time_per_img = elapsed_so_far / total_generated
+                remaining_imgs = total_expected_images - current_image_idx
+                eta_seconds = avg_time_per_img * remaining_imgs
+                
+                logging.info(
+                    f"✓ Saved batch {batch_names} in {format_time(gen_time)} | "
+                    f"Avg: {avg_time_per_img:.2f}s/img | ETA: {format_time(eta_seconds)}"
+                )
+            except Exception as e:
+                logging.error(f"❌ Error generating batch {batch_names}: {e}")
+                continue
 
     elapsed = time.time() - start_time
     logging.info("\n" + "=" * 60)

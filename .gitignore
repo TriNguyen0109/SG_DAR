@@ -11,9 +11,15 @@ venv/
 .idea/
 .cache/
 
-# Generated Output & Logs
+# Generated Output & Logs & Dataset Images
 generated_images/
 generated_images_baseline/
 generated_images_sketch/
+sketches/
 *.log
-*.csv
+# Models & Weights
+models/
+*.safetensors
+*.bin
+*.pth
+*.onnx
