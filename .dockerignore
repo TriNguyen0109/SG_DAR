@@ -1,9 +1,0 @@
-**/__pycache__
-**/.venv
-**/.vscode
-**/.git
-**/.gitignore
-**/.cache
-generated_images/
-*.csv
-*.log
